@@ -25,7 +25,7 @@ Building on this discovery, we introduce **SparseMM**, a KV-Cache optimization s
 ## Main Results
 ### Results on Multi-modal Benchmarks
 <p align="center" width="100%">
-<img src="https://github.com/CR400AF-A/SparseMM/blob/main/assets/main_results.png" alt="main_results.png" width=90%>
+<img src="https://github.com/CR400AF-A/SparseMM/blob/main/assets/main_result.png" alt="main_result.png" width=90%>
 </p>
 <div>
 
