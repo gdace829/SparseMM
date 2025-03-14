@@ -78,7 +78,6 @@ pip install qwen-vl-utils
 
 4. Install lmms-eval for evaluation
 ```bash
-# lmms-eval
 cd lmms-eval
 pip install -e .
 cd ..
@@ -118,6 +117,6 @@ If you found this repository useful, please consider citing:
 
 ## Acknowledgement
 
-- Our codebase is conducted on [AdaKV](https://github.com/FFY0/AdaKV) and [PyramidKV](https://github.com/Zefan-Cai/KVCache-Factory)
+- Our codebase is conducted on [AdaKV](https://github.com/FFY0/AdaKV) and [PyramidKV](https://github.com/Zefan-Cai/KVCache-Factory).
 
 - Thanks to [lmms-eval](https://github.com/EvolvingLMMs-Lab/lmms-eval) team, for building such a useful evaluation system!
