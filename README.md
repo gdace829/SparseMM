@@ -47,22 +47,37 @@ Building on this discovery, we introduce **SparseMM**, a KV-Cache optimization s
 ## Get Started
 
 ### Install
+1. Clone this repository:
 ```bash 
-git clone xxx
+git clone https://github.com/CR400AF-A/SparseMM.git
 cd SparseMM
+```
+
+2. Init your environment
+```bash
 conda create -n sparsemm python=3.10 -y
 conda activate sparsemm
+```
 
+3. Install packages
 
+Compile CUDA code for Flatten Cache Storage. If you encounter a CUDA compile error, please check your [GPU Virtual Architecture](https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/index.html#virtual-architecture-feature-list) and [GPU Feature](https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/index.html#gpu-feature-list), then change the corresponding compile flag in [csrc/build.py](https://github.com/CR400AF-A/SparseMM/blob/main/csrc/build.py#L20)
+```bash
 pip install packaging torch==2.5.1
 pip uninstall ninja && pip cache purge && pip install ninja --no-cache-dir
 cd csrc && make
 cd ..
+```
+
+Install other packages
+```bash
 pip install -e .
-
-pip install flash-attn==2.4.1 --no-build-isolation
+pip install flash-attn==2.4.1 --no-build-isolation # currently only support FlashAttention
 pip install qwen-vl-utils
+```
 
+4. Install lmms-eval for evaluation
+```bash
 # lmms-eval
 cd lmms-eval
 pip install -e .
@@ -100,3 +115,9 @@ If you found this repository useful, please consider citing:
 
 ``` 
 ```
+
+## Acknowledgement
+
+- Our codebase is conducted on [AdaKV](https://github.com/FFY0/AdaKV) and [PyramidKV](https://github.com/Zefan-Cai/KVCache-Factory)
+
+- Thanks to [lmms-eval](https://github.com/EvolvingLMMs-Lab/lmms-eval) team, for building such a useful evaluation system!
