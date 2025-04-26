@@ -2,7 +2,7 @@
 
 This repository contains PyTorch implementation for SparseMM.
 
-[Project Page]() | [arXiv Paper]()
+[Project Page](https://cr400af-a.github.io/SparseMM/) | [arXiv Paper]()
 
 ## Introduce SparseMM
 We investigate how MLLMs process visual inputs by analyzing their attention mechanisms and reveal a surprising sparsity phenomenon: only a small subset (approximately less than 5\%) of attention heads in LLMs actively contribute to visual understanding, termed **Visual Heads**. To identify these heads efficiently, we design a training-free framework that quantifies head-level visual relevance through targeted response analysis. 
