@@ -2,7 +2,7 @@
 
 This repository contains PyTorch implementation for SparseMM.
 
-[Project Page](https://cr400af-a.github.io/SparseMM/) | [arXiv Paper]()
+[Project Page](https://cr400af-a.github.io/SparseMM/) | [arXiv Paper](https://arxiv.org/abs/2506.05344)
 
 ## Introduce SparseMM
 We investigate how MLLMs process visual inputs by analyzing their attention mechanisms and reveal a surprising sparsity phenomenon: only a small subset (approximately less than 5\%) of attention heads in LLMs actively contribute to visual understanding, termed **Visual Heads**. To identify these heads efficiently, we design a training-free framework that quantifies head-level visual relevance through targeted response analysis. 
@@ -112,7 +112,13 @@ bash scripts/others/speed_and_memory.sh
 
 If you found this repository useful, please consider citing:
 
-``` 
+```
+@article{wang2025sparsemm,
+  title={SparseMM: Head Sparsity Emerges from Visual Concept Responses in MLLMs},
+  author={Wang, Jiahui and Liu, Zuyan and Rao, Yongming and Lu, Jiwen},
+  journal={arXiv preprint arXiv:2506.05344},
+  year={2025}
+}
 ```
 
 ## Acknowledgement
