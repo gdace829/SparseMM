@@ -85,6 +85,17 @@ cd ..
 
 
 ### Chase Visual Head
+1. download Synthdog dataset:
+```bash
+huggingface-cli download --repo-type dataset --resume-download nnethercott/synthdog-en-detection --local-dir /path/to/datasets/synthdog-en-detection
+```
+
+2. process dataset:
+```bash
+python3 scripts/chase_visual_head/process_data.py
+```
+
+3. chase visual head:
 ```bash 
 bash scripts/chase_visual_head/llava.sh
 bash scripts/chase_visual_head/qwen.sh
