@@ -33,7 +33,7 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 device = 'cuda:0'
 #############  load model  #############
 # llava
-pretrained = "/path/to/models/llava-mistral-v1.6"
+pretrained = "liuhaotian/llava-v1.5-7b"
 enc, model, image_processor, max_length = load_pretrained_model(pretrained, None, get_model_name_from_path(pretrained), device_map=device)
 config = model.config
 conv_mode = "vicuna_v1"

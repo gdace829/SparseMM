@@ -22,7 +22,7 @@ from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 from sparsemm.sparsemm_utils import DynamicCacheSplitHeadFlatten
 
 logger = logging.get_logger(__name__)
-
+# 使用不同的kv cache
 def llama_flash_attn2_forward_SnapKV(
     self,
     hidden_states: torch.Tensor,
@@ -412,6 +412,8 @@ def llama_flash_attn2_forward_AdaKV(
 
     return attn_output, attn_weights, past_key_value
 
+# 该函数 `llama_flash_attn2_forward_SparseMM` 是 Llama 模型中用于稀疏注意力（SparseMM）前向传播的实现，主要用于高效地处理大规模序列的自注意力计算，支持 KV cache 机制和滑动窗口等特性，适配 FlashAttention2 的高性能实现。
+
 def llama_flash_attn2_forward_SparseMM(
     self,
     hidden_states: torch.Tensor,
@@ -421,33 +423,37 @@ def llama_flash_attn2_forward_SparseMM(
     output_attentions: bool = False,
     use_cache: bool = False,
     cache_position: Optional[torch.LongTensor] = None,
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # v4.46后将强制要求
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    # 1. 检查 cache 类型，StaticCache 不支持 flash_attention_2
     if isinstance(past_key_value, StaticCache):
         raise ValueError(
             "`static` cache implementation is not compatible with `attn_implementation==flash_attention_2` "
             "make sure to use `sdpa` in the mean time, and open an issue at https://github.com/huggingface/transformers"
         )
+    # 2. 初始化稀疏注意力相关结构
     init_sparsemm(self)
-    output_attentions = False
+    output_attentions = False# 不输出注意力权重（节省显存和计算）。
 
+    # 3. 获取 batch size 和 query 长度
     bsz, q_len, _ = hidden_states.size()
 
+    # 4. 线性变换得到 Q, K, V
     query_states = self.q_proj(hidden_states)
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
-    # Flash attention requires the input to have the shape
-    # batch_size x seq_length x head_dim x hidden_dim
-    # therefore we just need to keep the original shape
+    # 5. 变换 Q, K, V 形状以适配 FlashAttention
     query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
     key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
     value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
+    # 6. 计算当前 key 的序列长度（考虑 cache）
     kv_seq_len = key_states.shape[-2]
     if past_key_value is not None:
         kv_seq_len += cache_position[0]
 
+    # 7. 位置编码（RoPE），兼容未来 transformers 版本
     if position_embeddings is None:
         logger.warning_once(
             "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
@@ -461,11 +467,14 @@ def llama_flash_attn2_forward_SparseMM(
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
     dropout_rate = self.attention_dropout if self.training else 0.0
 
+    # 8. 处理 KV cache 相关逻辑
     if past_key_value is not None:
-        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+        # 构造 cache 相关参数
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
 
+        # 判断 cache 是否有内容
         cache_has_contents = past_key_value.get_seq_length(self.layer_idx) > 0
+        # 如果启用 sliding_window 且 kv_seq_len 超过窗口，进行裁剪
         if (
             getattr(self.config, "sliding_window", None) is not None
             and kv_seq_len > self.config.sliding_window
@@ -489,19 +498,11 @@ def llama_flash_attn2_forward_SparseMM(
                 attention_mask = attention_mask[:, slicing_tokens:]
                 attention_mask = torch.cat([attention_mask, torch.ones_like(attention_mask[:, -1:])], dim=-1)
     
-
-
-    # In PEFT, usually we cast the layer norms in float32 for training stability reasons
-    # therefore the input hidden states gets silently casted in float32. Hence, we need
-    # cast them back in the correct dtype just to be sure everything works as expected.
-    # This might slowdown training & inference so it is recommended to not cast the LayerNorms
-    # in fp32. (LlamaRMSNorm handles it correctly)
-
+    # 9. 处理 LayerNorm/Embedding 上 float32 上溢问题，保证类型一致
     input_dtype = query_states.dtype
     if input_dtype == torch.float32:
         if torch.is_autocast_enabled():
             target_dtype = torch.get_autocast_gpu_dtype()
-        # Handle the case where the model is quantized
         elif hasattr(self.config, "_pre_quantization_dtype"):
             target_dtype = self.config._pre_quantization_dtype
         else:
@@ -517,17 +518,20 @@ def llama_flash_attn2_forward_SparseMM(
         key_states = key_states.to(target_dtype)
         value_states = value_states.to(target_dtype)
 
-    
+    # 10. 判断是 prefill（批量推理）还是 decode（单 token 推理）
     is_prefill = q_len != 1
 
     if is_prefill:
+        # 预填充阶段，更新 kv_cluster 并写入 cache
         key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states)
         past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs)
 
+        # 转置回 flash attention 期望的形状
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
 
+        # 调用 flash attention 前向
         attn_output = _flash_attention_forward(
             query_states,
             key_states,
@@ -543,17 +547,18 @@ def llama_flash_attn2_forward_SparseMM(
 
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
     else:
+        # decode 阶段，更新 cache 并处理元数据
         cache_kwargs["head_lens"] = self.kv_cluster.head_lens
         cache_kwargs["cu_klen"] = self.kv_cluster.cu_klen
         key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-
-        # NOTE: update meta data
+        # 更新 kv_cluster 的元数据
         self.kv_cluster.klen_sum += self.num_heads
         self.kv_cluster.max_seqlen_k += 1
         self.kv_cluster.cu_klen += self.kv_cluster.cu_offset
         self.kv_cluster.head_lens += 1
 
+        # 变换形状以适配 flash_attn_varlen_func
         query_states = query_states.view(-1, self.num_key_value_groups, self.head_dim)
         key_states = key_states.view(-1,1,self.head_dim)
         value_states = value_states.view(-1,1,self.head_dim)
@@ -565,16 +570,19 @@ def llama_flash_attn2_forward_SparseMM(
 
         attn_output = flash_attn_varlen_func(query_states, key_states, value_states, cu_seqlens_q,
                                              cu_seqlens_k, max_seqlen_q, max_seqlen_k, causal=True)
-        #  TODO: support batch size > 1
+        # 目前只支持 batch size = 1
         assert bsz == 1
         attn_output = attn_output.reshape(bsz, self.num_heads, q_len, self.head_dim)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.hidden_size)
 
+    # 11. 输出投影
     attn_output = self.o_proj(attn_output)
 
+    # 12. 不输出注意力权重
     if not output_attentions:
         attn_weights = None
 
+    # 13. 返回注意力输出、权重（None）、以及 cache
     return attn_output, attn_weights, past_key_value
 
 def llama_flash_attn2_forward_Mask(
@@ -823,7 +831,9 @@ def prepare_inputs_for_generation_llama_new(
             }
         )
         return model_inputs
-
+# 这段代码是自定义的 adaptive_LlamaModel_forward 函数，
+# 是对 Hugging Face transformers 中 Llama 模型 forward 方法的重写（猴子补丁用）。
+# 它的作用是实现 Llama 模型的前向推理流程，并兼容稀疏推理、缓存、梯度检查点等高级特性。
 def adaptive_LlamaModel_forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -889,12 +899,26 @@ def adaptive_LlamaModel_forward(
     all_hidden_states = () if output_hidden_states else None
     all_self_attns = () if output_attentions else None
     next_decoder_cache = None
+    # 在你给出的 adaptive_LlamaModel_forward 代码中，
+    # 支持 SparseMM 等自定义 attention 的关键点在于每一层 decoder layer 的 forward 调用：
 
+    # 依次遍历 transformer 的每一层（通常是 LlamaBlock）。
     for decoder_layer in self.layers:
+        # 这里的 decoder_layer 实际上是 LlamaBlock 或类似的 transformer 层对象。
+        # 你在 monkeypatch（比如 sparsemm/monkeypatch.py）时，
+        # 已经把 LlamaBlock 或 LlamaFlashAttention2 的 forward 方法替换成了你自定义的实现
+        # （如 llama_flash_attn2_forward_SparseMM）。
+        # 所以每次调用 decoder_layer(...)，
+        # 实际上就是在用你自定义的 SparseMM attention 逻辑，而不是原生 dense attention。
+
+        # 如果需要输出每层的 hidden states，就把当前 hidden_states 存起来
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
+
+      
         if self.gradient_checkpointing and self.training:
+            #  果启用了梯度检查点（节省显存的训练技巧），用 checkpoint 包裹每层的 forward 调用。
             layer_outputs = self._gradient_checkpointing_func(
                 decoder_layer.__call__,
                 hidden_states,
@@ -907,6 +931,10 @@ def adaptive_LlamaModel_forward(
                 position_embeddings,
             )
         else:
+            # decoder_layer(...) 这里调用每一层的 forward 方法，
+            # 输入当前的 hidden_states 及各种 mask、位置编码、缓存等参数。
+            # 如果你用 monkeypatch 替换了 decoder_layer 的 forward（比如用 SparseMM attention），
+            # 这里就会自动用你的自定义实现。
             layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask,
@@ -917,6 +945,8 @@ def adaptive_LlamaModel_forward(
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
             )
+        # hidden_states = layer_outputs[0]
+        # 更新 hidden_states，作为下一层的输入。
 
         hidden_states = layer_outputs[0]
 

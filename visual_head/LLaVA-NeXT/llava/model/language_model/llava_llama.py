@@ -42,7 +42,7 @@ class LlavaConfig(LlamaConfig):
     top_p: Optional[float] = None
     # rope_scaling: Optional[dict] = {}
 
-
+# llava+llama
 class LlavaLlamaModel(LlavaMetaModel, LlamaModel):
     config_class = LlavaConfig
 
@@ -59,7 +59,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         # configure default generation settings
         config.model_type = "llava_llama"
         # config.rope_scaling = None
-
+        # 不同llava模型主要这里低座模型不同
         self.model = LlavaLlamaModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing

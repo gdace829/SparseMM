@@ -268,12 +268,13 @@ def parse_eval_args() -> argparse.Namespace:
     args = parser.parse_args()
     return args
 
-
+# lmms-eval主函数 sjs 调用了评测单个模型任务函数cli_evaluate_single
 def cli_evaluate(args: Union[argparse.Namespace, None] = None) -> None:
+    # 如果没有传入args，则解析命令行参数
     if not args:
         args = parse_eval_args()
 
-    # Check if no arguments were passed after parsing
+    # 检查是否没有传递任何参数，如果没有则提示用户并退出
     if len(sys.argv) == 1:
         print("┌───────────────────────────────────────────────────────────────────────────────┐")
         print("│ Please provide arguments to evaluate the model. e.g.                          │")
@@ -282,14 +283,17 @@ def cli_evaluate(args: Union[argparse.Namespace, None] = None) -> None:
         print("└───────────────────────────────────────────────────────────────────────────────┘")
         sys.exit(1)
 
+    # 如果设置了wandb参数，则初始化wandb logger
     if args.wandb_args:
+        # 如果wandb参数中没有name字段，则自动生成一个name
         if "name" not in args.wandb_args:
             name = f"{args.model}_{args.model_args}_{utils.get_datetime_str(timezone=args.timezone)}"
             name = utils.sanitize_long_string(name)
             args.wandb_args += f",name={name}"
+        # 解析wandb参数并初始化WandbLogger
         wandb_logger = WandbLogger(**simple_parse_args_string(args.wandb_args))
 
-    # reset logger
+    # 重置logger，设置日志输出到stdout，并设置日志级别
     eval_logger.remove()
     eval_logger.add(sys.stdout, colorize=True, level=args.verbosity)
     eval_logger.info(f"Verbosity set to {args.verbosity}")
@@ -298,6 +302,7 @@ def cli_evaluate(args: Union[argparse.Namespace, None] = None) -> None:
 
     args_list = []
     results_list = []
+    # 如果指定了config文件，则从config文件中读取参数，支持多个配置
     if args.config:
         if not os.path.exists(args.config):
             raise ValueError(f"Config file does not exist: {args.config}")
@@ -305,16 +310,17 @@ def cli_evaluate(args: Union[argparse.Namespace, None] = None) -> None:
         with open(args.config, "r") as file:
             config_args = yaml.safe_load(file)
         config_args = [config_args] if type(config_args) != list else config_args
-        # multiple configs, create args list first
+        # 多个配置，依次生成args对象
         for config in config_args:
             args_copy = argparse.Namespace(**vars(args))
             for key, value in config.items():
                 setattr(args_copy, key, value)
             args_list.append(args_copy)
     else:
+        # 只用命令行参数
         args_list.append(args)
 
-    # initialize Accelerator
+    # 初始化Accelerator，用于分布式加速
     kwargs_handler = InitProcessGroupKwargs(timeout=datetime.timedelta(seconds=60000))
     accelerator = Accelerator(kwargs_handlers=[kwargs_handler])
     if accelerator.is_main_process:
@@ -322,19 +328,21 @@ def cli_evaluate(args: Union[argparse.Namespace, None] = None) -> None:
     else:
         is_main_process = False
 
+    # 遍历每个args配置，依次评测
     for args in args_list:
         try:
-            # if is_main_process and args.wandb_args:  # thoughtfully we should only init wandb once, instead of multiple ranks to avoid network traffics and unwanted behaviors.
-            #     wandb_logger = WandbLogger()
-
+            # 评测单个配置，返回结果和样本
             results, samples = cli_evaluate_single(args)
             results_list.append(results)
 
+            # 等待所有进程同步
             accelerator.wait_for_everyone()
+            # 只在主进程且设置了wandb参数时进行wandb日志记录
             if is_main_process and args.wandb_args:
                 try:
                     wandb_logger.post_init(results)
                     wandb_logger.log_eval_result()
+                    # 如果设置了wandb_log_samples且有样本，则记录样本
                     if args.wandb_log_samples and samples is not None:
                         wandb_logger.log_eval_samples(samples)
                 except Exception as e:
@@ -342,6 +350,7 @@ def cli_evaluate(args: Union[argparse.Namespace, None] = None) -> None:
                 # wandb_logger.finish()
 
         except Exception as e:
+            # 如果日志级别为DEBUG，则抛出异常，否则打印错误信息并继续
             if args.verbosity == "DEBUG":
                 raise e
             else:
@@ -349,78 +358,100 @@ def cli_evaluate(args: Union[argparse.Namespace, None] = None) -> None:
                 eval_logger.error(f"Error during evaluation: {e}. Please set `--verbosity=DEBUG` to get more information.")
                 results_list.append(None)
 
+    # 打印每个配置的评测结果
     for args, results in zip(args_list, results_list):
-        # cli_evaluate will return none if the process is not the main process (rank 0)
+        # cli_evaluate会在非主进程返回None，这里只处理有结果的情况
         if results is not None:
             print(f"{args.model} ({args.model_args}), gen_kwargs: ({args.gen_kwargs}), limit: {args.limit}, num_fewshot: {args.num_fewshot}, " f"batch_size: {args.batch_size}")
             print(make_table(results))
             if "groups" in results:
                 print(make_table(results, "groups"))
 
+    # 评测结束后关闭wandb run
     if args.wandb_args:
         wandb_logger.run.finish()
 
-
+# 评测单个模型任务
 def cli_evaluate_single(args: Union[argparse.Namespace, None] = None) -> None:
+    # 解析任务列表
     selected_task_list = args.tasks.split(",") if args.tasks else None
 
+    # 如果指定了 include_path，打印日志
     if args.include_path is not None:
         eval_logger.info(f"Including path: {args.include_path}")
+    # 初始化任务管理器
     task_manager = TaskManager(args.verbosity, include_path=args.include_path, model_name=args.model)
 
-    # update the evaluation tracker args with the output path and the HF token
+    # 更新 evaluation tracker 的参数，添加输出路径和 HF token
     if args.output_path:
         args.hf_hub_log_args += f",output_path={args.output_path}"
     if os.environ.get("HF_TOKEN", None):
         args.hf_hub_log_args += f",token={os.environ.get('HF_TOKEN')}"
 
+    # 解析 evaluation tracker 参数
     evaluation_tracker_args = simple_parse_args_string(args.hf_hub_log_args)
     eval_logger.info(f"Evaluation tracker args: {evaluation_tracker_args}")
 
+    # 初始化 EvaluationTracker
     evaluation_tracker = EvaluationTracker(**evaluation_tracker_args)
 
+    # 如果只预测，则强制记录样本
     if args.predict_only:
         args.log_samples = True
+    # 如果需要记录样本或只预测但未指定输出路径，抛出异常
     if (args.log_samples or args.predict_only) and not args.output_path:
         raise ValueError("Specify --output_path if providing --log_samples or --predict_only")
 
+    # fewshot_as_multiturn 必须配合 apply_chat_template 使用
     if args.fewshot_as_multiturn and args.apply_chat_template is False:
         raise ValueError("If fewshot_as_multiturn is set, apply_chat_template must be set to True.")
 
+    # fewshot_as_multiturn 时，num_fewshot 必须大于 0
     if (args.num_fewshot is None or args.num_fewshot == 0) and args.fewshot_as_multiturn:
         raise ValueError("If fewshot_as_multiturn is set, num_fewshot must be greater than 0.")
 
+    # 再次打印 include_path 日志（冗余，和上面重复）
     if args.include_path is not None:
         eval_logger.info(f"Including path: {args.include_path}")
 
+    # 如果要推送样本到 hub 但未设置 log_samples，警告
     if "push_samples_to_hub" in evaluation_tracker_args and not args.log_samples:
         eval_logger.warning("Pushing samples to the Hub requires --log_samples to be set. Samples will not be pushed to the Hub.")
 
+    # limit 参数仅用于测试，警告
     if args.limit:
         eval_logger.warning(" --limit SHOULD ONLY BE USED FOR TESTING." "REAL METRICS SHOULD NOT BE COMPUTED USING LIMIT.")
 
+    # 如果设置了插件环境变量，动态添加插件任务路径
     if os.environ.get("LMMS_EVAL_PLUGINS", None):
         args.include_path = [args.include_path] if args.include_path else []
         for plugin in os.environ["LMMS_EVAL_PLUGINS"].split(","):
             package_tasks_location = importlib.util.find_spec(f"{plugin}.tasks").submodule_search_locations[0]
             args.include_path.append(package_tasks_location)
 
+    # 处理不同的 tasks 参数情况
     if args.tasks is None:
+        # 未指定任务，报错并退出
         eval_logger.error("Need to specify task to evaluate.")
         sys.exit()
     elif args.tasks == "list":
+        # 列出所有可用任务
         eval_logger.info("Available Tasks:\n - {}".format(f"\n - ".join(sorted(task_manager.list_all_tasks()))))
         sys.exit()
     elif args.tasks == "list_groups":
+        # 列出所有任务组
         eval_logger.info(task_manager.list_all_tasks(list_subtasks=False, list_tags=False))
         sys.exit()
     elif args.tasks == "list_tags":
+        # 列出所有标签
         eval_logger.info(task_manager.list_all_tasks(list_groups=False, list_subtasks=False))
         sys.exit()
     elif args.tasks == "list_subtasks":
+        # 列出所有子任务
         eval_logger.info(task_manager.list_all_tasks(list_groups=False, list_tags=False))
         sys.exit()
     elif args.tasks == "list_with_num":
+        # 列出所有任务及其样本数量
         log_message = (
             "\n" + "=" * 70 + "\n" + "\n\tYou are trying to check all the numbers in each task." + "\n\tThis action will download the complete dataset." + "\n\tIf the results are not clear initially, call this again." + "\n\n" + "=" * 70
         )
@@ -438,6 +469,7 @@ def cli_evaluate_single(args: Union[argparse.Namespace, None] = None) -> None:
                 eval_logger.debug(f"\nTask : {task_name} fail to load \n Exception : \n {e}")
         sys.exit()
     else:
+        # 处理自定义任务路径或逗号分隔的任务名
         if os.path.isdir(args.tasks):
             import glob
 
@@ -447,12 +479,15 @@ def cli_evaluate_single(args: Union[argparse.Namespace, None] = None) -> None:
                 config = utils.load_yaml_config(yaml_file)
                 task_names.append(config)
         else:
+            # 逗号分隔的任务名
             task_list = args.tasks.split(",")
             task_names = task_manager.match_tasks(task_list)
+            # 检查未匹配到的任务，尝试按文件加载
             for task in [task for task in task_list if task not in task_names]:
                 if os.path.isfile(task):
                     config = utils.load_yaml_config(task)
                     task_names.append(config)
+            # 检查仍未找到的任务（排除通配符）
             task_missing = [task for task in task_list if task not in task_names and "*" not in task]  # we don't want errors if a wildcard ("*") task name was used
 
             if task_missing:
@@ -464,10 +499,14 @@ def cli_evaluate_single(args: Union[argparse.Namespace, None] = None) -> None:
                     f"Tasks not found: {missing}. Try `lmms-eval --tasks {{list_groups,list_subtasks,list_tags,list}}` to list out all available names for task groupings; only (sub)tasks; tags; or all of the above, or pass '--verbosity DEBUG' to troubleshoot task registration issues."
                 )
 
+    # 打印最终选中的任务
     eval_logger.info(f"Selected Tasks: {task_names}")
+    # 解析请求缓存参数
     request_caching_args = request_caching_arg_to_dict(cache_requests=args.cache_requests)
+    # 获取当前时间字符串
     datetime_str = utils.get_datetime_str(timezone=args.timezone)
 
+    # 执行评测
     results = evaluator.simple_evaluate(
         model=args.model,
         model_args=args.model_args,
@@ -498,23 +537,30 @@ def cli_evaluate_single(args: Union[argparse.Namespace, None] = None) -> None:
         **request_caching_args,
     )
 
+    # 处理评测结果
     if results is not None:
+        # 如果记录样本，从结果中弹出 samples
         if args.log_samples:
             samples = results.pop("samples")
         else:
             samples = None
+        # 打印配置（如需）
         dumped = json.dumps(results, indent=4, default=_handle_non_serializable)
         if args.show_config:
             print(dumped)
 
+        # 记录 batch size 信息
         batch_sizes = ",".join(map(str, results["config"]["batch_sizes"]))
 
+        # 保存聚合结果
         evaluation_tracker.save_results_aggregated(results=results, samples=samples if args.log_samples else None, datetime_str=datetime_str)
 
+        # 保存每个任务的样本（如需）
         if args.log_samples:
             for task_name, config in results["configs"].items():
                 evaluation_tracker.save_results_samples(task_name=task_name, samples=samples[task_name])
 
+        # 如果需要推送到 hub，重建 metadata 卡片
         if evaluation_tracker.push_results_to_hub or evaluation_tracker.push_samples_to_hub:
             evaluation_tracker.recreate_metadata_card()
 
@@ -528,6 +574,6 @@ def print_results(args, results):
     if "groups" in results:
         print(evaluator.make_table(results, "groups"))
 
-
+# 主进程
 if __name__ == "__main__":
     cli_evaluate()

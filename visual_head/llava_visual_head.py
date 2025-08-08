@@ -22,8 +22,8 @@ head_counter = defaultdict(list)
 #############  load model  #############
 model_version = "llava-v1.6"
 layer_num = 32
-head_num = 32
-pretrained = "/path/to/models/llava-v1.6"
+head_num = 32# "/path/to/models/llava-v1.6"
+pretrained = "llava-hf/llava-v1.6-mistral-7b-hf"
 enc, model, image_processor, max_length = load_pretrained_model(pretrained, None, get_model_name_from_path(pretrained), attn_implementation="eager")
 config = model.config
 config = config

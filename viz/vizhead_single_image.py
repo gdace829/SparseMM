@@ -17,8 +17,8 @@ try:
     from llava.conversation import conv_templates, SeparatorStyle
 except ImportError:
     print("LLaVA is not installed. Please install LLaVA to use this model.")
-
-pretrained = "/path/to/models/llava-v1.6"
+# /path/to/models/llava-v1.6
+pretrained = "llava-hf/llava-v1.6-mistral-7b-hf"
 enc, model, image_processor, max_length = load_pretrained_model(pretrained, None, get_model_name_from_path(pretrained), attn_implementation='eager')
 config = model.config
 config = config

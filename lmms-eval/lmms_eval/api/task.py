@@ -1040,7 +1040,9 @@ class ConfigurableTask(Task):
             # using local task in offline environment, need to process the online dataset into local format via
             # `ds = load_datasets("lmms-lab/MMMU")`
             self.dataset = datasets.load_from_disk(path=self.DATASET_PATH, name=self.DATASET_NAME)
-        else:
+        else:# 下载多模态评估数据集需要使用huggingface的tokensjs
+            # echo840/OCRBench None sjs
+            print(self.DATASET_PATH,self.DATASET_NAME,"sjs")
             self.dataset = datasets.load_dataset(
                 path=self.DATASET_PATH,
                 name=self.DATASET_NAME,

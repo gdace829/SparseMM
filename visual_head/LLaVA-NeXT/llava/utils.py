@@ -69,7 +69,10 @@ def process_video_with_pyav(video_file, data_args):
     frames = [video_frames[i] for i in frame_idx]
     return np.stack([x.to_ndarray(format="rgb24") for x in frames])
 
-
+# 这个函数 rank0_print 是在分布式训练环境中用于控制输出的函数。
+# 其主要作用是在分布式训练的多进程设置中，只允许 rank 0 的进程输出信息。
+# 其他进程（如 rank 1, rank 2 等）
+# 则不会执行打印操作。这样做的目的是避免在多进程训练中，多个进程同时打印信息，从而造成输出冗余。
 def rank0_print(*args):
     if dist.is_initialized():
         if dist.get_rank() == 0:

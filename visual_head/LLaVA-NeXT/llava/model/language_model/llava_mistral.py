@@ -36,10 +36,10 @@ class LlavaMistralConfig(MistralConfig):
     do_sample: bool = False
     top_p: Optional[float] = None
 
-
+# 这个类集成了大语言模型和投影器 mistral+llava
 class LlavaMistralModel(LlavaMetaModel, MistralModel):
     config_class = LlavaMistralConfig
-
+    # 这个model前向传播是怎样的
     def __init__(self, config: MistralConfig):
         super(LlavaMistralModel, self).__init__(config)
 
