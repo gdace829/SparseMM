@@ -11,7 +11,7 @@ import json
 import warnings
 from typing import List, Optional, Tuple
 from transformers.cache_utils import Cache
-
+# 加载注意力头分数 sjs
 def load_head_score(model_type):
     if 'llava' in model_type:
         if 'mistral' not in model_type:
@@ -453,12 +453,29 @@ class AdaKVCluster():
 
         return heads_key_states, heads_value_states
 
+# sjs 该类用来对kvcache进行压缩
 class SparseMM():
     def __init__(self, window_size = 32, kernel_size = 7, pooling = 'maxpool', base_capacity=None, ratio=None, normalize=None, 
                  layer_idx = None, num_hidden_layers = None, head_score=None, num_attention_heads=32, num_key_value_groups=1, gqa_func='mean', model_type=None):
+        # —— 基本超参 —— 
+        # window_size: 滑窗长度，保证最近窗口内 token 无条件保留
+        # kernel_size: 1D 池化核大小（平滑打分曲线）
+        # pooling: 'maxpool' 或 'avgpool'，用于历史重要性序列的平滑
+        # base_capacity: “每头总预算”中的历史可选容量基线（注意下方会减去 window_size）
+        # ratio: 每头最小容量占 base_capacity 的比例（其余按 head_score 分配）
+        # normalize: 预留开关（未使用）
+        # layer_idx / num_hidden_layers: 当前层索引 & 总层数（用于按层分配容量）
+        # head_score: 'random' 或 'visual'，决定每个头的重要性分布
+        # num_attention_heads: Q 的总头数
+        # num_key_value_groups: GQA 的 KV 组数（H//G 个“分组头”）
+        # gqa_func: 组内聚合函数（'mean' 或 'max'）
+        # model_type: 供 'visual' 读取先验分数时使用
+
         self.window_size = window_size
         self.kernel_size = kernel_size
         self.pooling = pooling
+        # 注意：这里将可选历史容量定义为 base_capacity - window_size
+        # 也就是：历史部分通过打分选 Top-K；最近 window_size 个 token 额外无条件拼上
         self.base_capacity = base_capacity - window_size
         self.ratio = ratio
 
@@ -467,35 +484,51 @@ class SparseMM():
         self.num_attention_heads = num_attention_heads  
         self.num_hidden_layers = num_hidden_layers
 
-        # NOTE: layer-wise meta-data
-        self.head_lens = None
-        self.max_seqlen_k = 0
-        self.klen_sum = 0
-        self.cu_klen = 0
+        # —— 变长注意力需要的元数据（在 update_kv 内部初始化） ——
+        self.head_lens = None            # 每(分组后)头的最终 K 长度列表
+        self.max_seqlen_k = 0            # 所有头中的最大 K 长度
+        self.klen_sum = 0                # 所有头的 K 长度之和
+        self.cu_klen = 0                 # 累积偏移（prefix sum），便于 varlen kernel
         self.cu_offset = None
         self.cu_headlens = None
 
         self.num_key_value_groups = num_key_value_groups
         self.gqa_func = gqa_func
 
+        # —— 构建 per-layer, per-head 的重要性分数分布（用于分配历史容量） ——
         if head_score == 'random':
+            # 随机重要性：形状为 [num_hidden_layers * num_attention_heads]
             head_score_list = np.array([random.random() for _ in range(self.num_hidden_layers * self.num_attention_heads)])
         elif head_score == 'visual':
+            # 可视化统计得到的先验重要性（外部函数）：随后取均值作为头分数
             head_score = load_head_score(model_type)
             head_score_list = [np.mean(l[1]) for l in head_score.items()]
-        head_score_list = torch.tensor(head_score_list / sum(head_score_list))
-        # GQA support
+        head_score_list = torch.tensor(head_score_list / sum(head_score_list))  # 归一化到和为 1
+        # GQA support：将 [L*H] reshape 为 [L, H//G, G]，并在组维上求和 -> [L, H//G]
         self.score = head_score_list.view(self.num_hidden_layers, self.num_attention_heads//self.num_key_value_groups, self.num_key_value_groups)
         self.score = self.score.sum(dim=-1)
 
-        min_cache = int(self.base_capacity * self.ratio)
+        # —— 容量分配：每个(分组后)头的历史 Top-K 容量（不含 window_size） ——
+        min_cache = int(self.base_capacity * self.ratio)  # 每头最小保底（历史）容量
+        # 全局“可分配的剩余历史容量”= (base-min)*层数*分组头数
         remain_capacity = (self.base_capacity - min_cache) * self.num_hidden_layers * self.num_attention_heads // self.num_key_value_groups
+        # 按 self.score 将剩余容量分配到每层每(分组后)头；最后还会在实际拼接时再加上 window_size
         self.head_adaptive_capacity = torch.round(self.score * remain_capacity + min_cache).int()
 
     def calcul_attn_sore(self, key_states, query_states):
+        # 说明：函数名里“sore”为原样保留（按你的代码），含义为“score”
+        # 输入：
+        #   key_states:   [B, H, T, D]（这里传的是 repeat_kv 之后的 H）
+        #   query_states: [B, H, T, D]
+        # 输出：
+        #   attn_weights_mean_pooling: [B, H//G, T - window_size] 历史段的重要性序列（池化后）
+
         bsz, num_heads, q_len, head_dim = query_states.shape
+
+        # 仅用“最后 window_size 个 query”与“全长 key”计算注意力打分（QK^T / sqrt(D)）
         attn_weights = torch.matmul(query_states[..., -self.window_size:, :], key_states.transpose(2, 3)) / math.sqrt(
             head_dim)
+        # 构造因果遮罩，仅应用在右下角 window×window 子块：禁止最后窗口内“看未来”
         mask = torch.full((self.window_size, self.window_size), torch.finfo(attn_weights.dtype).min,
                           device=attn_weights.device)
         mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
@@ -503,11 +536,14 @@ class SparseMM():
         mask = mask.to(attn_weights.device)
         attention_mask = mask[None, None, :, :]
 
+        # 将因果遮罩加到 (最后 W 个 query, 最后 W 个 key) 的子矩阵上
         attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
 
+        # 在 key 维做 softmax，随后对“最后 W 个 query”在 query 维求均值 -> 得到每个 key 的平均重要性
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights_mean = attn_weights[:, :, -self.window_size:, : -self.window_size].mean(dim=-2)
 
+        # GQA 聚合：把 H 维 reshape 为 [H//G, G]，在组维上聚合（mean 或 max）
         attn_weights_mean = attn_weights_mean.view(attn_weights_mean.shape[0],num_heads//self.num_key_value_groups,self.num_key_value_groups,-1)
         if self.gqa_func == 'max':
             attn_weights_mean = attn_weights_mean.max(dim=-2).values
@@ -516,6 +552,7 @@ class SparseMM():
         else:
             raise ValueError('gqa_func not supported')
 
+        # 1D 池化（沿时间维）以平滑历史重要性序列
         if self.pooling == 'avgpool':
             attn_weights_mean_pooling = F.avg_pool1d(attn_weights_mean, kernel_size=self.kernel_size,
                                                      padding=self.kernel_size // 2,
@@ -530,26 +567,39 @@ class SparseMM():
 
 
     def update_kv(self, origin_key_states, query_states, origin_value_states):
+        # 按头进行分组，每个头的预算不一样，最终还是服务decoder阶段
+        # 目标：基于 calcul_attn_sore 的历史重要性，在每(分组后)头选择 Top-K 历史位置；
+        #      然后与最近 window_size 的 token 进行拼接，得到压缩的 KV，并生成 varlen 元数据。
+        # 输入：
+        #   origin_key_states / origin_value_states: [B, H//G, T, D]（未 repeat 的 KV）
+        #   query_states: [B, H, T, D]（Q）
+        # 输出：
+        #   heads_key_states / heads_value_states: [sum_k, D]（所有(分组后)头展平拼接后的 K/V）
+
         key_states = repeat_kv(origin_key_states, self.num_key_value_groups)
         # value_states = repeat_kv(origin_value_states, self.num_key_value_groups)
         _device = key_states.device
         bsz, num_heads, q_len, head_dim = query_states.shape
+
+        # 历史段（: -window）重要性序列（形状 [B, H//G, T - window]）
         attn_score= self.calcul_attn_sore(key_states,query_states)
-        # import pdb; pdb.set_trace()
+
+        # 将未 repeat 的 per-(分组后)头拆开，便于逐头 gather
         origin_heads_key_states = torch.split(origin_key_states, 1, dim=1)
         origin_heads_value_states = torch.split(origin_value_states, 1, dim=1)
 
         def init_metadata(num_heads, k_lens, klen_sum, max_seqlen_k):
-            # init metadata
+            # 初始化供 varlen/FlashAttention 使用的前缀和元数据
+            # k_lens: 每(分组后)头的最终 K 长度（历史Top-K + window_size）
             self.head_lens = torch.tensor(k_lens, dtype=torch.int32, device=_device)
             self.klen_sum = klen_sum
             self.max_seqlen_k = max_seqlen_k
             self.cu_headlens = torch.cumsum(self.head_lens, dim=0, dtype=torch.int32)
-            # init varlen flash attention metadata
+            # cu_klen：每头在展平后的起始偏移（前缀和 - 自身长度），末尾补总长
             self.cu_klen = self.cu_headlens - self.head_lens
             self.cu_klen = torch.cat(
                 [self.cu_klen, torch.tensor([self.klen_sum], dtype=torch.int32, device=_device)], dim=0)
-            # check bug
+            # 注意：这里把每(分组后)头的 Q 长度设为 1，以满足某些 varlen kernel 的接口
             self.layer_qlens = torch.ones(num_heads//self.num_key_value_groups, dtype=torch.int32,device=_device)
             self.qlen_sum = num_heads//self.num_key_value_groups
             self.cu_qlen = torch.cumsum(self.layer_qlens, dim=0, dtype=torch.int32) - self.layer_qlens
@@ -560,13 +610,15 @@ class SparseMM():
             self.cu_offset = torch.arange(0, num_heads//self.num_key_value_groups + 1, dtype=torch.int32, device=_device)
             self.cu_head_offset = torch.arange(1, num_heads//self.num_key_value_groups +1, dtype=torch.int32, device=_device)
 
+        # 情况1：如果“历史可选容量”比历史长度还大，则无需裁剪，直接保留全长（历史+window）
         if self.base_capacity > attn_score.size(-1):
             init_metadata(num_heads, [q_len] * (num_heads//self.num_key_value_groups), q_len * (num_heads//self.num_key_value_groups), q_len)
             # not compress
             return origin_key_states.reshape(-1, head_dim), origin_value_states.reshape(-1, head_dim)
 
+        # 情况2：需要裁剪历史：对历史重要性降序排序，取索引
         _,indices = attn_score.sort(dim=-1,descending=True)
-
+        # 拆成 per-(分组后)头列表（每个元素 [B,1,T-history]）
         indices = indices.split(1,dim=1)
 
         heads_key_states = []
@@ -574,7 +626,7 @@ class SparseMM():
         assert bsz == 1
         # per head
 
-        # reinit varlen metadata
+        # 重新收集 varlen 元数据
         k_lens = []
         klen_sum = 0
         max_seqlen_k = 0
@@ -582,30 +634,37 @@ class SparseMM():
 
 
         for head_idx in range(num_heads//self.num_key_value_groups):
+            # 每个(分组后)头独立选取 top-K 历史索引（cap 由 head_adaptive_capacity 决定）
             cache_index = indices[head_idx][...,:self.head_adaptive_capacity[self.layer_idx][head_idx]]
 
+            # 本头最终长度 = 历史 top-K 数量 + window_size
             l = cache_index.shape[-1] + self.window_size
             k_lens.append(l)
             max_seqlen_k = max(max_seqlen_k, l)
             klen_sum += l
 
+            # gather 需要把索引扩展到 [B,1,cap,D]
             cache_index = cache_index.view(1, 1, -1, 1).expand(-1, -1, -1, head_dim)
+            # 从“未 repeat”的 per-head K/V 中抓取历史 top-K（对应 : -window 的区间）
             top_Kcache = origin_heads_key_states[head_idx].gather(dim=2,index=cache_index)
             top_Vcache = origin_heads_value_states[head_idx].gather(dim=2,index=cache_index)
+            # 与最近 window_size 的 token 拼接（这些 token 无条件保留）
             selected_k = torch.cat([top_Kcache,origin_heads_key_states[head_idx][:, :, -self.window_size:, :]],dim=2)
             selected_v = torch.cat([top_Vcache,origin_heads_value_states[head_idx][:, :, -self.window_size:, :]],dim=2)
 
-            # NOTE: flatten view
+            # NOTE: flatten view（展平成 [len, D]，便于后续 varlen kernel）
             heads_key_states.append(selected_k.view(-1, head_dim))
             heads_value_states.append(selected_v.view(-1, head_dim))
 
+        # 初始化变长元数据
         init_metadata(num_heads, k_lens, klen_sum, max_seqlen_k)
 
-        # NOTE: compose as flatten view
+        # NOTE: compose as flatten view（拼接所有(分组后)头）
         heads_key_states = torch.cat(heads_key_states, dim=0)
         heads_value_states = torch.cat(heads_value_states, dim=0)
 
         return heads_key_states, heads_value_states
+
 
 
 def init_pyramidkv(self):
@@ -704,8 +763,9 @@ def init_adakv(self):
             num_key_value_groups = self.config.num_attention_heads // self.config.num_key_value_heads,
             gqa_func = self.config.gqa_func
         )
-
+# 初始化sparsemm kv_cluster sjs
 def init_sparsemm(self):
+    # 初始化参数，如果没有设置，则设置为默认值
     if not hasattr(self, "kv_cluster"):
         if not hasattr(self.config, 'window_size'):
             self.config.window_size = 32

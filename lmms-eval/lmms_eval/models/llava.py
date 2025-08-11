@@ -36,11 +36,11 @@ try:
         process_images,
         tokenizer_image_token,
     )
-    from llava.model.builder import load_pretrained_model
+    from llava.model.builder import load_pretrained_model# 这里调用的应该是视觉头的llava初始化代码
     
 except Exception as e:
     eval_logger.debug("LLaVA is not installed. Please install LLaVA to use this model.\nError: %s" % e)
-# 引入其他的包
+# 引入其他的包 这里是lmm评估的模型引入了替换的模块 sjs
 try:
     from sparsemm.monkeypatch import replace_llama, replace_mistral
 except Exception as e:
@@ -90,7 +90,7 @@ class Llava(lmms):
         import os
 
         method = os.getenv('METHOD', None)# 从系统环境变量获取method
-
+        # 根据不同底座选用不同方法
         # 不同底座采用不同的替换方法，替换的是底座的代码
         if 'mistral' not in pretrained:# 根据mistra选择不同的预训练模型
             # llama系列模型的KV稀疏替换

@@ -17,7 +17,8 @@ from sparsemm.qwen_model import prepare_inputs_for_generation_qwen, adakv_qwen_f
 # transformers库中Llama相关模型的forward方法，
 # 以便用自定义的稀疏推理实现（SparseMM）。
 def replace_llama(method):
-# 这里主要改的是语言模型
+    # 改变语言模型
+    # 这个替换为了使用 SnapKV 特定的计算方法。
     if method == "snapkv":
         # 有些不用改llamaforward
         print("Using SnapKV!")
@@ -34,13 +35,15 @@ def replace_llama(method):
         transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = llama_flash_attn2_forward_AdaKV
     # 如果传入的 method 是 "sparsemm"，就执行下面的代码。
     elif method == "sparsemm":
-        # 把 transformers 库里 LlamaModel 的 forward 方法替换成你自定义的
-        # adaptive_LlamaModel_forward。
-        # 这样以后所有 LlamaModel 的前向推理都会走你的自定义逻辑。
+        # 在 adaptive_LlamaModel_forward 里，
+        # 真正“做注意力”的地方就是调用每一层 decoder layer 的那一行；
+        # 进入 layer 之后会调用它的 self_attn.forward，
+        # 而你已经把它打补丁成 llama_flash_attn2_forward_SparseMM，再往里就是 FA2 内核。
+
+        # 把llama前向传播函数改为稀疏前向传播
         print("Using SparseMM!")
         transformers.models.llama.modeling_llama.LlamaModel.forward = adaptive_LlamaModel_forward
-        # 同理，把 LlamaFlashAttention2 的 forward 方法替换成你自定义的 
-        # llama_flash_attn2_forward_SparseMM。
+        # 修改flashattention中稀疏前向传播
         transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = llama_flash_attn2_forward_SparseMM
 
     elif method == 'mask':

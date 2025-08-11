@@ -3,7 +3,7 @@ import torch
 
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from llava.conversation import conv_templates, SeparatorStyle
-from llava.model.builder import load_pretrained_model
+from llava.model.builder import load_pretrained_model# 视觉头调用了 sjs
 from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
 
@@ -94,7 +94,7 @@ def main(args):
         if args.debug:
             print("\n", {"prompt": prompt, "outputs": outputs}, "\n")
 
-
+# 调用视觉头的main函数 sjs
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str, default="facebook/opt-350m")
